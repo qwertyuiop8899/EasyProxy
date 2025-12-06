@@ -6,4 +6,3 @@ zstandard
 pycryptodome
 beautifulsoup4
 lxml
-python-socks
