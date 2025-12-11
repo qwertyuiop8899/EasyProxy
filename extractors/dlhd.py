@@ -45,15 +45,15 @@ class DLHDExtractor:
         # ✅ Lista host iframe (caricata da cache o vuota)
         self.iframe_hosts = cache_data.get('hosts', [])
         
-        # ✅ Configurazione server dinamica dal worker
+        # ✅ Configurazione server dinamica dal worker (usando TEMPLATE completi)
         self.auth_url = cache_data.get('auth_url', 'https://security.giokko.ru/auth2.php')
-        self.stream_cdn = cache_data.get('stream_cdn', 'https://top1.giokko.ru')
-        self.stream_pattern = cache_data.get('stream_pattern', 'https://{KEY}new.giokko.ru')
+        self.stream_cdn_template = cache_data.get('stream_cdn_template', 'https://top1.giokko.ru/top1/cdn/{CHANNEL}/mono.css')
+        self.stream_other_template = cache_data.get('stream_other_template', 'https://{SERVER_KEY}new.giokko.ru/{SERVER_KEY}/{CHANNEL}/mono.css')
         
         logger.info(f"Hosts caricati all'avvio: {self.iframe_hosts}")
         logger.info(f"Auth URL: {self.auth_url}")
-        logger.info(f"Stream CDN: {self.stream_cdn}")
-        logger.info(f"Stream Pattern: {self.stream_pattern}")
+        logger.info(f"Stream CDN Template: {self.stream_cdn_template}")
+        logger.info(f"Stream Other Template: {self.stream_other_template}")
 
     def _load_cache(self) -> Dict[str, Any]:
         """Carica la cache da un file codificato in Base64 all'avvio. Ritorna struttura completa."""
@@ -129,8 +129,8 @@ class DLHDExtractor:
                     'hosts': self.iframe_hosts,
                     'streams': self._stream_data_cache,
                     'auth_url': self.auth_url,
-                    'stream_cdn': self.stream_cdn,
-                    'stream_pattern': self.stream_pattern
+                    'stream_cdn_template': self.stream_cdn_template,
+                    'stream_other_template': self.stream_other_template
                 }
                 json_data = json.dumps(cache_data)
                 encoded_data = base64.b64encode(json_data.encode('utf-8')).decode('utf-8')
@@ -159,12 +159,12 @@ class DLHDExtractor:
                         if line.startswith('#AUTH_URL:'):
                             self.auth_url = line.replace('#AUTH_URL:', '').strip()
                             logger.info(f"✅ Auth URL aggiornato: {self.auth_url}")
-                        elif line.startswith('#STREAM_CDN:'):
-                            self.stream_cdn = line.replace('#STREAM_CDN:', '').strip()
-                            logger.info(f"✅ Stream CDN aggiornato: {self.stream_cdn}")
-                        elif line.startswith('#STREAM_PATTERN:'):
-                            self.stream_pattern = line.replace('#STREAM_PATTERN:', '').strip()
-                            logger.info(f"✅ Stream Pattern aggiornato: {self.stream_pattern}")
+                        elif line.startswith('#STREAM_CDN_TEMPLATE:'):
+                            self.stream_cdn_template = line.replace('#STREAM_CDN_TEMPLATE:', '').strip()
+                            logger.info(f"✅ Stream CDN Template aggiornato: {self.stream_cdn_template}")
+                        elif line.startswith('#STREAM_OTHER_TEMPLATE:'):
+                            self.stream_other_template = line.replace('#STREAM_OTHER_TEMPLATE:', '').strip()
+                            logger.info(f"✅ Stream Other Template aggiornato: {self.stream_other_template}")
                         elif not line.startswith('#'):
                             new_hosts.append(line)
                     
@@ -183,18 +183,24 @@ class DLHDExtractor:
         return False
 
     def _get_headers_for_url(self, url: str, base_headers: dict) -> dict:
-        """Applica headers specifici per giokko.ru automaticamente"""
+        """Applica headers specifici per il dominio stream automaticamente"""
         headers = base_headers.copy()
         parsed_url = urlparse(url)
         
-        if "giokko.ru" in parsed_url.netloc:
-            giokko_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            giokko_headers = {
+        # Estrai dominio base da stream_cdn_template (es: 'https://top1.giokko.ru/top1/cdn/{CHANNEL}/mono.css' -> 'giokko.ru')
+        try:
+            stream_domain = urlparse(self.stream_cdn_template).netloc.split('.', 1)[-1]  # 'top1.giokko.ru' -> 'giokko.ru'
+        except:
+            stream_domain = 'giokko.ru'  # Fallback
+        
+        if stream_domain in parsed_url.netloc:
+            origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            special_headers = {
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-                'Referer': giokko_origin,
-                'Origin': giokko_origin
+                'Referer': origin,
+                'Origin': origin
             }
-            headers.update(giokko_headers)
+            headers.update(special_headers)
         
         return headers
 
@@ -396,8 +402,18 @@ class DLHDExtractor:
                         auth_text = await auth_resp.text()
                         logger.info(f"Auth response: {auth_resp.status} - {auth_text[:100]}")
                         
-                        if auth_resp.status != 200 or 'Blocked' in auth_text:
-                            logger.warning(f"⚠️ Auth bloccato da {iframe_host}")
+                        if auth_resp.status != 200 or 'Blocked' in auth_text or 'bad params' in auth_text.lower():
+                            logger.warning(f"⚠️ Auth bloccato da {iframe_host}: {auth_text[:50]}")
+                            
+                            # ✅ NUOVO: Se è il primo host e auth fallisce, prova a refreshare config
+                            if iframe_host == hosts_to_try[0] and not getattr(self, '_config_refreshed', False):
+                                logger.info("🔄 Auth fallito, provo ad aggiornare config dal worker...")
+                                self._config_refreshed = True
+                                if await self._fetch_iframe_hosts():
+                                    # Aggiorna auth_url per il prossimo tentativo
+                                    auth_url = self.auth_url
+                                    logger.info(f"✅ Config aggiornata, nuovo auth_url: {auth_url}")
+                            
                             last_error = ExtractorError(f"Auth blocked: {auth_text}")
                             continue
                         
@@ -436,13 +452,13 @@ class DLHDExtractor:
                     channel_key = params['channel_key']
                     auth_token = params['auth_token']
                     
-                    # ✅ DINAMICO: usa self.stream_cdn e self.stream_pattern
+                    # ✅ DINAMICO: usa templates completi
                     if server_key == 'top1/cdn':
-                        stream_url = f'{self.stream_cdn}/top1/cdn/{channel_key}/mono.css'
+                        # Usa stream_cdn_template (es: https://top1.giokko.ru/top1/cdn/{CHANNEL}/mono.css)
+                        stream_url = self.stream_cdn_template.replace('{CHANNEL}', channel_key)
                     else:
-                        # Sostituisci {KEY} con server_key nel pattern
-                        base_url = self.stream_pattern.replace('{KEY}', server_key)
-                        stream_url = f'{base_url}/{server_key}/{channel_key}/mono.css'
+                        # Usa stream_other_template (es: https://{SERVER_KEY}new.giokko.ru/{SERVER_KEY}/{CHANNEL}/mono.css)
+                        stream_url = self.stream_other_template.replace('{SERVER_KEY}', server_key).replace('{CHANNEL}', channel_key)
                     
                     logger.info(f"✅ Stream URL costruito: {stream_url}")
                     
@@ -473,6 +489,9 @@ class DLHDExtractor:
                             logger.info(f"⏳ Auth Expiry: {expires_at} (Current time: {time.time()})")
                     except (ValueError, TypeError):
                         pass
+                    
+                    # ✅ Reset flag per permettere futuri refresh
+                    self._config_refreshed = False
                     
                     return {
                         "destination_url": stream_url,
@@ -625,7 +644,12 @@ class DLHDExtractor:
                 
                 if channel_match:
                     channel_name = channel_match.group(1)
-                    server = server_match.group(1) if server_match else 'giokko.ru'
+                    # Estrai dominio base da stream_cdn_template come fallback
+                    try:
+                        fallback_domain = urlparse(self.stream_cdn_template).netloc.split('.', 1)[-1]
+                    except:
+                        fallback_domain = 'giokko.ru'
+                    server = server_match.group(1) if server_match else fallback_domain
                     stream_url = f"https://{server}/{channel_name}/mono.m3u8"
                     logger.info(f"Constructed stream URL: {stream_url}")
             
@@ -690,7 +714,7 @@ class DLHDExtractor:
         logger.info("New auth flow detected. Proceeding with POST auth.")
         
         # 1. Initial Auth POST
-        auth_url = 'https://security.giokko.ru/auth2.php'
+        auth_url = self.auth_url  # Usa auth_url dinamico
         form_data = FormData()
         form_data.add_field('channelKey', params["channel_key"])
         form_data.add_field('country', params["auth_country"])
@@ -739,9 +763,11 @@ class DLHDExtractor:
         auth_token = params['auth_token']
         # The JS logic uses .css, not .m3u8
         if server_key == 'top1/cdn':
-            stream_url = f'https://top1.giokko.ru/top1/cdn/{channel_key}/mono.css'
+            # Usa stream_cdn_template (es: https://top1.giokko.ru/top1/cdn/{CHANNEL}/mono.css)
+            stream_url = self.stream_cdn_template.replace('{CHANNEL}', channel_key)
         else:
-            stream_url = f'https://{server_key}new.giokko.ru/{server_key}/{channel_key}/mono.css'
+            # Usa stream_other_template (es: https://{SERVER_KEY}new.giokko.ru/{SERVER_KEY}/{CHANNEL}/mono.css)
+            stream_url = self.stream_other_template.replace('{SERVER_KEY}', server_key).replace('{CHANNEL}', channel_key)
         
         logger.info(f'New auth flow: Constructed stream URL: {stream_url}')
 
