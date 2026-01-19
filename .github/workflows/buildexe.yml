@@ -1,0 +1,71 @@
+name: Build EasyProxy EXE
+
+on:
+  push:
+    tags:
+      - 'v*'  # Run when pushing a tag like v1.0.0
+  workflow_dispatch:  # Allow manual run
+
+jobs:
+  build-windows:
+    name: Build EasyProxy.exe for Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📥 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: 🧾 Create dummy .env if missing
+        run: |
+          if (-not (Test-Path ".env")) {
+            echo "Creating dummy .env for build"
+            echo "PORT=7860" > .env
+          }
+
+      - name: ⚙️ Build EasyProxy.exe
+        shell: pwsh
+        run: |
+          # Define data folders to include
+          # Format: "source_folder;dest_folder"
+          # We include all key directories from EasyProxy structure
+          
+          pyinstaller launcher.py `
+            --onefile `
+            --name EasyProxy `
+            --add-data "static;static" `
+            --add-data "templates;templates" `
+            --add-data "extractors;extractors" `
+            --add-data "routes;routes" `
+            --add-data "services;services" `
+            --add-data "utils;utils" `
+            --add-data ".env;." `
+            --hidden-import aiohttp `
+            --hidden-import aiohttp.web `
+            --hidden-import engineio.async_drivers.aiohttp `
+            --collect-all aiohttp `
+            --clean
+
+      - name: 📦 Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EasyProxy-exe
+          path: dist/EasyProxy.exe
+
+      - name: 🚀 GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/EasyProxy.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
