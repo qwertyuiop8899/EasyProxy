@@ -618,7 +618,15 @@ class DLHDExtractor:
                 # Procedi con l'estrazione diretta
                 logger.info(f"⚙️ No valid cache for {channel_id}, starting direct extraction...")
                 
-                lovecdn_url = await self._fetch_worker_config_for_channel(channel_id)
+                # Check LoveCDN cooldown
+                last_fail = self._lovecdn_failure_time.get(channel_id, 0)
+                lovecdn_url = None
+                
+                if time.time() - last_fail < 120:
+                    logger.info(f"⏳ LoveCDN in cooldown (failed {int(time.time() - last_fail)}s ago). Skipping worker check.")
+                else:
+                    lovecdn_url = await self._fetch_worker_config_for_channel(channel_id)
+
                 if lovecdn_url:
                     logger.info(f"✅ Worker provided LoveCDN URL: {lovecdn_url}. Using as primary extraction method.")
                     try:
