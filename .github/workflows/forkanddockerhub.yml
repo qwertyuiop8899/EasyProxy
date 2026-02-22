@@ -1,0 +1,110 @@
+name: Sync Fork, Build and Push Docker Image
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Run every hour
+  workflow_dispatch:      # Allow manual run
+  push:
+    branches: [main]      # Run on push to main
+
+jobs:
+  sync-build-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout the repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: ⚙️ Configure Git
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+      - name: 🔗 Add upstream remote
+        run: git remote add upstream https://github.com/stremio-manager/EasyProxy.git
+
+      - name: 📥 Fetch upstream changes
+        run: git fetch upstream
+
+      - name: 🔄 Force sync fork from upstream (Preserving custom files)
+        run: |
+          # 1. Backup custom files we want to keep
+          # We want to keep launcher.py, requirements.txt and our workflows
+          
+          mkdir -p /tmp/backup_workflows
+          
+          if [ -f launcher.py ]; then
+            cp launcher.py /tmp/launcher.py
+          fi
+
+          if [ -f requirements.txt ]; then
+            cp requirements.txt /tmp/requirements.txt
+          fi
+          
+          # Backup workflows
+          cp .github/workflows/buildexe.yml /tmp/backup_workflows/buildexe.yml
+          cp .github/workflows/forkanddockerhub.yml /tmp/backup_workflows/forkanddockerhub.yml
+          
+          # 2. Hard reset to upstream/main
+          # This makes our branch exactly like the original repo
+          git reset --hard upstream/main
+          
+          # 3. Restore our custom files
+          
+          # Restore launcher.py
+          if [ -f /tmp/launcher.py ]; then
+            mv /tmp/launcher.py launcher.py
+            git add launcher.py
+          fi
+
+          # Restore requirements.txt
+          if [ -f /tmp/requirements.txt ]; then
+            mv /tmp/requirements.txt requirements.txt
+            git add requirements.txt
+          fi
+          
+          # Restore workflows
+          mkdir -p .github/workflows
+          mv /tmp/backup_workflows/buildexe.yml .github/workflows/buildexe.yml
+          mv /tmp/backup_workflows/forkanddockerhub.yml .github/workflows/forkanddockerhub.yml
+          
+          git add .github/workflows/buildexe.yml
+          git add .github/workflows/forkanddockerhub.yml
+          
+          # 4. Commit and Force Push
+          # We only commit if there are changes (i.e., if we restored files that were lost or if upstream changed)
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit after restore."
+          else
+            git commit -m "Restore custom workflows, requirements.txt and launcher.py after sync with upstream"
+            git push origin main --force
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🐳 Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔑 Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_API }}
+
+      - name: 📦 Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ secrets.DOCKER_USERNAME }}/easyproxy:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
