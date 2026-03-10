@@ -210,6 +210,78 @@ class DLHDExtractor:
             raise ExtractorError(f"No server_key in response: {server_data}")
         return server_key
 
+    async def _extract_from_worker_config(self, channel_id: str) -> Dict[str, Any]:
+        """Estrazione diretta usando la configurazione del worker (senza scaricare iframe).
+        
+        Usa auth_url, server_lookup_url e stream_cdn/other_template già noti
+        per costruire lo stream URL direttamente.
+        """
+        channel_key = f"premium{channel_id}"
+        
+        logger.info(f"🚀 Tentativo estrazione diretta con config worker per canale {channel_id}")
+        logger.info(f"   auth_url: {self.auth_url}")
+        logger.info(f"   server_lookup_url: {self.server_lookup_url}")
+        logger.info(f"   stream_cdn_template: {self.stream_cdn_template}")
+        
+        if not self.server_lookup_url:
+            raise ExtractorError("server_lookup_url not available from worker config")
+        
+        # 1. Server Lookup
+        lookup_url = f"{self.server_lookup_url}?channel_id={channel_key}"
+        
+        # Usa il dominio base come referer
+        referer_domain = self.base_domain or "dlhd.link"
+        lookup_headers = {
+            'User-Agent': self.USER_AGENT,
+            'Accept': '*/*',
+            'Referer': f'https://{referer_domain}/',
+            'Origin': f'https://{referer_domain}',
+        }
+        
+        lookup_resp = await self._make_robust_request(lookup_url, headers=lookup_headers, retries=2)
+        server_data = await lookup_resp.json()
+        server_key = server_data.get('server_key')
+        if not server_key:
+            raise ExtractorError(f"No server_key from worker config lookup: {server_data}")
+        
+        logger.info(f"✅ Server key da worker config: {server_key}")
+        
+        # 2. Build Stream URL
+        stream_url = self._build_stream_url(server_key, channel_key)
+        logger.info(f"✅ Stream URL da worker config: {stream_url}")
+        
+        # 3. Build headers (senza auth token per ora, il verify potrebbe non servire per il proxy)
+        stream_headers = {
+            'User-Agent': self.USER_AGENT,
+            'Referer': f'https://{referer_domain}/',
+            'Origin': f'https://{referer_domain}',
+        }
+        
+        # 4. Verifica che lo stream funzioni
+        session = await self._get_session()
+        validation_timeout = ClientTimeout(total=8)
+        async with session.get(stream_url, headers=stream_headers, ssl=False, timeout=validation_timeout) as resp:
+            if resp.status == 200:
+                content = await resp.read()
+                content_str = content.decode('utf-8', errors='ignore')
+                if "#EXTM3U" in content_str or "#EXT" in content_str:
+                    logger.info(f"✅ Worker config stream verificato OK per canale {channel_id}")
+                    
+                    return {
+                        "destination_url": stream_url,
+                        "request_headers": stream_headers,
+                        "expires_at": time.time() + 3600,
+                        "mediaflow_endpoint": self.mediaflow_endpoint
+                    }
+                else:
+                    raise ExtractorError(f"Stream content not valid M3U8: {content_str[:100]}")
+            elif resp.status == 403:
+                # Potrebbe servire l'auth - prova con il token
+                logger.warning(f"⚠️ Stream returned 403, auth may be required")
+                raise ExtractorError(f"Stream returned 403 - auth required")
+            else:
+                raise ExtractorError(f"Stream returned status {resp.status}")
+
     async def _fetch_iframe_hosts(self, channel_id: str = None) -> bool:
         """Scarica la lista aggiornata degli host iframe."""
         # URL offuscato per evitare scraping statico
@@ -648,16 +720,26 @@ class DLHDExtractor:
                         logger.error(f"❌ Failed to extract from worker-provided LoveCDN URL: {e}. Falling back to standard hosts.")
                         self._lovecdn_failure_time[channel_id] = time.time()
                 
-                # Se lovecdn non c'è o fallisce, procedi con metodo standard
-                try:
-                    result = await self.get_stream_data_direct(channel_id, self.iframe_hosts)
-                except ExtractorError:
-                    # Se fallisce con gli host correnti, prova ad aggiornarli passando l'ID canale
-                    logger.warning(f"⚠️ All current hosts failed for channel {channel_id}. Attempting to update host list...")
-                    if await self._fetch_iframe_hosts(channel_id):
-                         result = await self.get_stream_data_direct(channel_id, self.iframe_hosts)
-                    else:
-                        raise
+                # Se lovecdn non c'è o fallisce, prova estrazione diretta con config del worker
+                result = None
+                
+                # PRIORITÀ 1: Usa la config del worker (auth_url, server_lookup, CDN template)
+                if self.server_lookup_url and (self.stream_cdn_template or self.stream_other_template):
+                    try:
+                        result = await self._extract_from_worker_config(channel_id)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Worker config extraction failed for {channel_id}: {e}. Trying iframe hosts...")
+
+                # PRIORITÀ 2: Metodo standard con iframe hosts
+                if not result:
+                    try:
+                        result = await self.get_stream_data_direct(channel_id, self.iframe_hosts)
+                    except ExtractorError:
+                        logger.warning(f"⚠️ All current hosts failed for channel {channel_id}. Attempting to update host list...")
+                        if await self._fetch_iframe_hosts(channel_id):
+                             result = await self.get_stream_data_direct(channel_id, self.iframe_hosts)
+                        else:
+                            raise
                 
                 # Salva in cache
                 result["_source"] = "standard"
