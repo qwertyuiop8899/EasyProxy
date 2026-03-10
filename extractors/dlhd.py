@@ -63,7 +63,7 @@ class DLHDExtractor:
         self.stream_cdn_template = cache_data.get('stream_cdn_template')
         self.stream_other_template = cache_data.get('stream_other_template')
         self.server_lookup_url = cache_data.get('server_lookup_url')
-        self.base_domain = cache_data.get('base_domain')
+        self.base_domain = cache_data.get('base_domain') or "dlstreams.top"
         self.lovecdn_url = cache_data.get('lovecdn_url') # ✅ Cache lovecdn url
         
         # Track failed LoveCDN attempts to implement retry logic
@@ -207,13 +207,17 @@ class DLHDExtractor:
             raise ExtractorError(f"No server_key in response: {server_data}")
         return server_key
 
-    async def _fetch_iframe_hosts(self) -> bool:
+    async def _fetch_iframe_hosts(self, channel_id: str = None) -> bool:
         """Scarica la lista aggiornata degli host iframe."""
         # URL offuscato per evitare scraping statico
         encoded_url = "aHR0cHM6Ly9pZnJhbWUuZGxoZC5kcGRucy5vcmcv"
         url = base64.b64decode(encoded_url).decode('utf-8')
         
-        logger.info(f"🔄 Updating iframe host list...")
+        if channel_id:
+            url = f"{url}?id={channel_id}"
+            logger.info(f"🔄 Updating iframe host list for channel {channel_id}...")
+        else:
+            logger.info(f"🔄 Updating iframe host list...")
         try:
             session = await self._get_session()
             async with session.get(url, ssl=False, timeout=ClientTimeout(total=10)) as response:
@@ -271,7 +275,7 @@ class DLHDExtractor:
         # Usa base_domain dinamico dal worker
         stream_domain = self.base_domain
 
-        if stream_domain in parsed_url.netloc:
+        if stream_domain and stream_domain in parsed_url.netloc:
             origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
             special_headers = {
                 'User-Agent': self.USER_AGENT,
@@ -638,9 +642,9 @@ class DLHDExtractor:
                 try:
                     result = await self.get_stream_data_direct(channel_id, self.iframe_hosts)
                 except ExtractorError:
-                    # Se fallisce con gli host correnti, prova ad aggiornarli
-                    logger.warning("⚠️ All current hosts failed. Attempting to update host list...")
-                    if await self._fetch_iframe_hosts():
+                    # Se fallisce con gli host correnti, prova ad aggiornarli passando l'ID canale
+                    logger.warning(f"⚠️ All current hosts failed for channel {channel_id}. Attempting to update host list...")
+                    if await self._fetch_iframe_hosts(channel_id):
                          result = await self.get_stream_data_direct(channel_id, self.iframe_hosts)
                     else:
                         raise
