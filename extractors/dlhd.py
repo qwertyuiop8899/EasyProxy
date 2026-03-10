@@ -63,6 +63,7 @@ class DLHDExtractor:
         self.stream_cdn_template = cache_data.get('stream_cdn_template')
         self.stream_other_template = cache_data.get('stream_other_template')
         self.server_lookup_url = cache_data.get('server_lookup_url')
+        self.heartbeat_url = cache_data.get('heartbeat_url')
         self.base_domain = cache_data.get('base_domain') or "dlstreams.top"
         self.lovecdn_url = cache_data.get('lovecdn_url') # ✅ Cache lovecdn url
         
@@ -74,6 +75,7 @@ class DLHDExtractor:
         logger.info(f"Stream CDN Template: {self.stream_cdn_template}")
         logger.info(f"Stream Other Template: {self.stream_other_template}")
         logger.info(f"Server Lookup URL: {self.server_lookup_url}")
+        logger.info(f"Heartbeat URL: {self.heartbeat_url}")
         logger.info(f"Base Domain: {self.base_domain}")
         if self.lovecdn_url:
             logger.info(f"LoveCDN URL: {self.lovecdn_url}")
@@ -146,6 +148,7 @@ class DLHDExtractor:
                     'stream_cdn_template': self.stream_cdn_template,
                     'stream_other_template': self.stream_other_template,
                     'server_lookup_url': self.server_lookup_url,
+                    'heartbeat_url': self.heartbeat_url,
                     'base_domain': self.base_domain,
                     'lovecdn_url': self.lovecdn_url
                 }
@@ -240,6 +243,9 @@ class DLHDExtractor:
                         elif line.startswith('#SERVER_LOOKUP_URL:'):
                             self.server_lookup_url = line.replace('#SERVER_LOOKUP_URL:', '').strip()
                             logger.info(f"✅ Server Lookup URL aggiornato: {self.server_lookup_url}")
+                        elif line.startswith('#HEARTBEAT_URL:'):
+                            self.heartbeat_url = line.replace('#HEARTBEAT_URL:', '').strip()
+                            logger.info(f"✅ Heartbeat URL aggiornato: {self.heartbeat_url}")
                         elif line.startswith('#BASE_DOMAIN:'):
                             self.base_domain = line.replace('#BASE_DOMAIN:', '').strip()
                             logger.info(f"✅ Base Domain aggiornato: {self.base_domain}")
@@ -424,6 +430,10 @@ class DLHDExtractor:
                             self.stream_cdn_template = line.replace('#STREAM_CDN_TEMPLATE:', '').strip()
                         elif line.startswith('#STREAM_OTHER_TEMPLATE:'):
                             self.stream_other_template = line.replace('#STREAM_OTHER_TEMPLATE:', '').strip()
+                        elif line.startswith('#SERVER_LOOKUP_URL:'):
+                            self.server_lookup_url = line.replace('#SERVER_LOOKUP_URL:', '').strip()
+                        elif line.startswith('#HEARTBEAT_URL:'):
+                            self.heartbeat_url = line.replace('#HEARTBEAT_URL:', '').strip()
                     
                     return lovecdn_found
                 else:
