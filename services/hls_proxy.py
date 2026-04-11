@@ -1141,7 +1141,7 @@ class HLSProxy:
                 scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
                 host = request.headers.get("X-Forwarded-Host", request.host)
                 proxy_base = f"{scheme}://{host}"
-                original_channel_url = request.query.get("url", "")
+                original_channel_url = request.query.get("url") or request.query.get("d", "")
                 api_password = request.query.get("api_password")
                 no_bypass = request.query.get("no_bypass") == "1"
                 rewritten_manifest = await ManifestRewriter.rewrite_manifest_urls(
@@ -2238,7 +2238,7 @@ class HLSProxy:
                     scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
                     host = request.headers.get("X-Forwarded-Host", request.host)
                     proxy_base = f"{scheme}://{host}"
-                    original_channel_url = request.query.get("url", "")
+                    original_channel_url = request.query.get("url") or request.query.get("d", "")
 
                     api_password = request.query.get("api_password")
                     no_bypass = request.query.get("no_bypass") == "1"
