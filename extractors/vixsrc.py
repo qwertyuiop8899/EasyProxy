@@ -3,8 +3,9 @@ import json
 import logging
 import random
 import re
+import time
 from typing import Any, Dict
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
@@ -49,6 +50,25 @@ class VixSrcExtractor:
     def _get_random_proxy(self):
         """Restituisce un proxy casuale dalla lista."""
         return random.choice(self.proxies) if self.proxies else None
+
+    @staticmethod
+    def _raise_if_embed_expired(url: str):
+        parsed = urlparse(url)
+        if "/embed/" not in parsed.path:
+            return
+        expires = parse_qs(parsed.query).get("expires", [None])[0]
+        if not expires:
+            return
+        try:
+            expires_ts = int(expires)
+        except (TypeError, ValueError):
+            return
+        now_ts = int(time.time())
+        if expires_ts <= now_ts:
+            raise ExtractorError(
+                f"Expired VixSrc embed URL (expired at {expires_ts}, current {now_ts}). "
+                "Use the original /movie/ or /tv/ URL to refresh tokens."
+            )
 
     async def _get_session(self):
         """Ottiene una sessione HTTP persistente."""
@@ -329,6 +349,7 @@ class VixSrcExtractor:
                 }
 
             if "/embed/" in parsed_url.path:
+                self._raise_if_embed_expired(url)
                 response = await self._make_robust_request(
                     url,
                     headers={

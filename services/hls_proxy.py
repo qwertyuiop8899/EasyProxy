@@ -710,7 +710,7 @@ class HLSProxy:
                     )
                 return self.extractors[key]
             elif "vixsrc.to/" in url.lower() and any(
-                x in url for x in ["/movie/", "/tv/", "/iframe/", "/playlist/"]
+                x in url for x in ["/movie/", "/tv/", "/iframe/", "/embed/", "/playlist/"]
             ):
                 key = "vixsrc"
                 proxy = get_proxy_for_url("vixsrc.to", TRANSPORT_ROUTES, GLOBAL_PROXIES)
