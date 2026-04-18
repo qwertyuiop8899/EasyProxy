@@ -72,7 +72,7 @@ Configure the server via a `.env` file. See `.env.example` for all options.
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `PORT` | Server port | `7860` |
-| `API_PASSWORD` | Optional password for API endpoints | ep |
+| `API_PASSWORD` | Optional password for API endpoints | `ep` |
 | `FLARESOLVERR_URL` | URL for FlareSolverr (Not needed in Full version) | `http://localhost:8191` |
 | `FLARESOLVERR_TIMEOUT` | Timeout for FlareSolverr requests (seconds) | `30` |
 | `BYPARR_URL` | URL for Byparr (Not needed in Full version) | `http://localhost:8192` |
