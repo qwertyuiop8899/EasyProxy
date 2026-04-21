@@ -9,10 +9,7 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlu
 
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
-from aiohttp_socks import ProxyConnector
 from config import get_proxy_for_url, TRANSPORT_ROUTES, GLOBAL_PROXIES, get_connector_for_proxy
-
-from utils.smart_request import smart_request
 
 logger = logging.getLogger(__name__)
 
@@ -51,31 +48,6 @@ class VixSrcExtractor:
         headers = self._default_headers()
         headers.update(extra_headers)
         return headers
-
-    def _merge_request_headers(self, incoming_headers: dict | None = None, **extra_headers) -> dict:
-        """Merge caller headers with sane VixSrc defaults, preserving referer/origin context."""
-        merged = self._fresh_headers()
-        for header_source in (self.request_headers, incoming_headers or {}):
-            if not header_source:
-                continue
-            for key, value in header_source.items():
-                if value is None:
-                    continue
-                merged[key] = value
-
-        # VixSrc child manifests/segments often need embed/movie context.
-        if not any(k.lower() == "referer" for k in merged):
-            merged["Referer"] = extra_headers.get("referer") or extra_headers.get("Referer")
-        if not any(k.lower() == "origin" for k in merged):
-            origin_value = extra_headers.get("origin") or extra_headers.get("Origin")
-            if origin_value:
-                merged["Origin"] = origin_value
-
-        for key, value in extra_headers.items():
-            if value is not None:
-                merged[key] = value
-
-        return merged
 
     @staticmethod
     def _normalize_base_site(url: str) -> str:
@@ -140,55 +112,42 @@ class VixSrcExtractor:
         return self.session
 
     async def _make_robust_request(
-        self, url: str, headers: dict = None, retries: int = 2, initial_delay: int = 1
+        self, url: str, headers: dict = None, retries: int = 3, initial_delay: int = 2
     ):
-        """Effettua richieste HTTP robuste usando smart_request per gestire Cloudflare."""
+        """Effettua richieste HTTP robuste con retry automatico."""
         final_headers = headers or {}
 
         for attempt in range(retries):
             try:
-                logger.debug("Attempt %s/%s for URL: %s", attempt + 1, retries, url)
-                
-                # Usiamo smart_request che gestisce già il bypass Cloudflare
-                result = await smart_request("request.get", url, headers=final_headers, proxies=self.proxies)
-                
-                # Se smart_request restituisce un dizionario, estraiamo l'html
-                html = result.get("html", "") if isinstance(result, dict) else result
-                
-                if html is None or html == "":
-                    raise ExtractorError(f"SmartRequest returned empty response for {url}")
+                session = await self._get_session(url)
+                logger.info("Attempt %s/%s for URL: %s", attempt + 1, retries, url)
 
-                class MockResponse:
-                    def __init__(self, text_content, status, response_url):
-                        self._content = text_content
-                        self.status = status
-                        self.headers = {} # Mocked
-                        self.url = response_url
-                        self.status_code = status
-                        # ✅ Assicurati che .text sia sempre una stringa per i regex
-                        self.text = text_content if isinstance(text_content, str) else json.dumps(text_content)
+                async with session.get(url, headers=final_headers) as response:
+                    response.raise_for_status()
+                    content = await response.text()
 
-                    @property
-                    def json_content(self):
-                        return self._content if isinstance(self._content, dict) else None
+                    class MockResponse:
+                        def __init__(self, text_content, status, headers_dict, response_url):
+                            self._text = text_content
+                            self.status = status
+                            self.headers = headers_dict
+                            self.url = response_url
+                            self.status_code = status
+                            self.text = text_content
 
-                    def raise_for_status(self):
-                        if self.status >= 400:
-                            raise aiohttp.ClientResponseError(
-                                request_info=None,
-                                history=None,
-                                status=self.status,
-                            )
+                        async def text_async(self):
+                            return self._text
 
-                logger.debug("Request successful for %s (via SmartRequest)", url)
-                return MockResponse(html, 200, url)
+                        def raise_for_status(self):
+                            if self.status >= 400:
+                                raise aiohttp.ClientResponseError(
+                                    request_info=None,
+                                    history=None,
+                                    status=self.status,
+                                )
 
-            except Exception as e:
-                logger.warning("SmartRequest attempt %s failed for %s: %s", attempt + 1, url, str(e))
-                if attempt < retries - 1:
-                    await asyncio.sleep(initial_delay)
-                else:
-                    raise ExtractorError(f"All SmartRequest attempts failed for {url}: {str(e)}")
+                    logger.info("Request successful for %s at attempt %s", url, attempt + 1)
+                    return MockResponse(content, response.status, response.headers, response.url)
 
             except (
                 aiohttp.ClientConnectionError,
@@ -212,7 +171,7 @@ class VixSrcExtractor:
 
                 if attempt < retries - 1:
                     delay = initial_delay * (2**attempt)
-                    logger.debug("Waiting %s seconds before next attempt...", delay)
+                    logger.info("Waiting %s seconds before next attempt...", delay)
                     await asyncio.sleep(delay)
                 else:
                     raise ExtractorError(f"All {retries} attempts failed for {url}: {str(e)}")
@@ -220,7 +179,7 @@ class VixSrcExtractor:
             except aiohttp.ClientResponseError as e:
                 if e.status == 404:
                     raise ExtractorError(f"VixSrc content not found (404): {url}")
-                
+
                 if attempt == retries - 1:
                     raise ExtractorError(f"Final HTTP error {e.status} for {url}: {str(e)}")
                 await asyncio.sleep(initial_delay)
@@ -286,23 +245,17 @@ class VixSrcExtractor:
             headers={
                 "accept": "application/json, text/plain, */*",
                 "referer": url,
-                "x-requested-with": "XMLHttpRequest",
                 **self._default_headers(),
             },
         )
 
         try:
-            # ✅ Usa il contenuto pre-parsato se disponibile, altrimenti parsa la stringa
-            text_content = getattr(response, 'text', '')
-            payload = getattr(response, 'json_content', None) or json.loads(text_content)
-        except (json.JSONDecodeError, TypeError, AttributeError) as exc:
-            preview = text_content[:200] if text_content else "N/A"
-            logger.error(f"❌ VixSrc API JSON Error. Response starts with: {preview}")
+            payload = json.loads(response.text)
+        except json.JSONDecodeError as exc:
             raise ExtractorError(f"Invalid API response from {api_url}: {exc}")
 
         embed_path = payload.get("src")
         if not embed_path:
-            logger.error(f"❌ VixSrc API Error: 'src' missing. Response payload: {payload}")
             raise ExtractorError(f"Missing embed src in API response from {api_url}")
 
         return urljoin(site_url, embed_path)
@@ -411,22 +364,12 @@ class VixSrcExtractor:
         try:
             parsed_url = urlparse(url)
             response = None
-            incoming_headers = kwargs.get("request_headers") or {}
 
             if "/playlist/" in parsed_url.path:
-                logger.debug("URL is already a VixSrc manifest, no extraction required.")
-                base_site = self._normalize_base_site(url)
+                logger.info("URL is already a VixSrc manifest, no extraction required.")
                 return {
                     "destination_url": url,
-                    "request_headers": self._merge_request_headers(
-                        incoming_headers,
-                        Referer=incoming_headers.get("Referer")
-                        or incoming_headers.get("referer")
-                        or f"{base_site}/",
-                        Origin=incoming_headers.get("Origin")
-                        or incoming_headers.get("origin")
-                        or base_site,
-                    ),
+                    "request_headers": self._fresh_headers(),
                     "mediaflow_endpoint": self.mediaflow_endpoint,
                 }
 
