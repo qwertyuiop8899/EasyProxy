@@ -97,11 +97,19 @@ class DLStreamsExtractor:
             
             import os
             chrome_path = os.getenv("CHROME_BIN") or os.getenv("CHROME_EXE_PATH")
+            logger.debug(f"DLStreams initialization - CHROME_BIN: {os.getenv('CHROME_BIN')}, CHROME_EXE_PATH: {os.getenv('CHROME_EXE_PATH')}")
             
+            if chrome_path and os.path.exists(chrome_path):
+                logger.info(f"DLStreams using browser path: {chrome_path}")
+                executable_path = chrome_path
+            else:
+                logger.warning(f"DLStreams could not find system Chromium at {chrome_path}, falling back to default")
+                executable_path = None
+
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(
                 headless=False,
-                executable_path=chrome_path if chrome_path and os.path.exists(chrome_path) else None,
+                executable_path=executable_path,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
