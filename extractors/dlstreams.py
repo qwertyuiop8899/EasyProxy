@@ -110,62 +110,65 @@ class DLStreamsExtractor:
         return f"{parsed.scheme}://{parsed.netloc}"
 
     async def _launch_browser(self):
-        if self._browser and self._context:
+        async with self._browser_launch_lock:
+            if self._browser and self._context:
+                try:
+                    # Verify the connection is still alive
+                    await self._browser.version()
+                    return self._playwright, self._browser, self._context
+                except Exception:
+                    self._browser = None
+                    self._context = None
+
+            if not self._playwright:
+                self._playwright = await async_playwright().start()
+
+            # --- SHARED BROWSER LOGIC (CDP) ---
+            try:
+                # Try to connect to an existing browser instance on port 9222
+                self._browser = await self._playwright.chromium.connect_over_cdp(
+                    "http://localhost:9222",
+                    timeout=2000 
+                )
+                # Use existing context if available, or create new one
+                contexts = self._browser.contexts
+                self._context = contexts[0] if contexts else await self._browser.new_context()
+                logger.info("🔗 [Shared Browser] Connected to existing instance on port 9222")
+            except Exception:
+                # No browser on 9222, launch a new Master instance
+                import os, sys
+                chrome_path = os.getenv("CHROME_BIN") or os.getenv("CHROME_EXE_PATH")
+                is_headless = sys.platform.startswith("linux")
+                executable_path = chrome_path if chrome_path and os.path.exists(chrome_path) else None
+
+                logger.info("🚀 [Shared Browser] Launching new Master instance on port 9222")
+                self._browser = await self._playwright.chromium.launch(
+                    headless=is_headless,
+                    executable_path=executable_path,
+                    args=[
+                        "--remote-debugging-port=9222",
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--autoplay-policy=no-user-gesture-required",
+                        "--disable-web-security",
+                        "--disable-features=IsolateOrigins,site-per-process",
+                    ],
+                )
+                self._context = await self._browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                    viewport={"width": 1366, "height": 768},
+                )
+
+            # Ensure we have a persistent dummy page to keep the context/browser alive
+            pages = self._context.pages
+            if not pages:
+                dummy_page = await self._context.new_page()
+                await dummy_page.goto("about:blank")
+                logger.debug("⚓ Created Shared Anchor Page (about:blank)")
+            
+            self._last_activity = time.time()
             return self._playwright, self._browser, self._context
-
-        import os, sys
-        chrome_path = os.getenv("CHROME_BIN") or os.getenv("CHROME_EXE_PATH")
-        
-        is_linux = sys.platform.startswith("linux")
-        is_headless = is_linux
-        
-        if chrome_path and os.path.exists(chrome_path):
-            executable_path = chrome_path
-        else:
-            executable_path = None
-
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=is_headless,
-            executable_path=executable_path,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--autoplay-policy=no-user-gesture-required",
-                "--disable-web-security",
-                "--disable-features=IsolateOrigins,site-per-process",
-            ],
-        )
-        
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-        self._context = await self._browser.new_context(
-            user_agent=user_agent,
-            viewport={"width": 1366, "height": 768},
-            device_scale_factor=1,
-        )
-        try:
-            await self._context.route(
-                "**/*",
-                lambda route, request: (
-                    route.abort()
-                    if request.resource_type in {"image", "font", "media"}
-                    else route.continue_()
-                ),
-            )
-        except Exception:
-            pass
-
-        # Create a dummy page to keep the browser window open and visible
-        # so it doesn't close and steal focus repeatedly when tabs are closed.
-        try:
-            dummy_page = await self._context.new_page()
-            await dummy_page.goto("about:blank")
-        except Exception:
-            pass
-
-        return self._playwright, self._browser, self._context
 
     def _get_header(self, name: str, default: str | None = None) -> str | None:
         for key, value in self.request_headers.items():
