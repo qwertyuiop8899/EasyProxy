@@ -246,10 +246,10 @@ class DoodStreamExtractor:
         html = response.text
         title_match = re.search(r"<title>(.*?)</title>", html, re.I)
         if title_match:
-            logger.info(f"ðŸŽ¬ DoodStream Page Title: {title_match.group(1)}")
+            logger.info(f"DoodStream Page Title: {title_match.group(1)}")
 
         if "Just a moment..." in html or "DDoS protection" in html or "cf-browser-verification" in html:
-            logger.warning("ðŸ›¡ï¸ DoodStream: cloudscraper returned 200 but Cloudflare challenge is present.")
+            logger.warning("DoodStream: cloudscraper returned 200 but Cloudflare challenge is present.")
 
         pass_path = self._extract_pass_path(html)
         token = self._extract_token(html, pass_path)
@@ -258,7 +258,7 @@ class DoodStreamExtractor:
             return None
 
         pass_url = urljoin(embed_url, pass_path)
-        logger.info(f"ðŸ”— Cloudscraper found pass_md5 path: {pass_path}")
+        logger.info(f"Cloudscraper found pass_md5 path: {pass_path}")
 
         pass_response = await asyncio.to_thread(
             scraper.get,
@@ -269,12 +269,12 @@ class DoodStreamExtractor:
         )
         if pass_response.status_code != 200 or len(pass_response.text) <= 10:
             logger.warning(
-                f"âš ï¸ DoodStream: pass_md5 request failed with status {pass_response.status_code} "
+                f"DoodStream: pass_md5 request failed with status {pass_response.status_code} "
                 f"and content: {pass_response.text[:100]}"
             )
             return None
 
-        logger.info("âœ… DoodStream: cloudscraper extraction successful!")
+        logger.info("DoodStream: cloudscraper extraction successful!")
         return self._finalize_extraction(pass_response.text.strip(), html, embed_url, _DOOD_UA)
 
     async def extract(self, url: str, **kwargs):
@@ -286,7 +286,7 @@ class DoodStreamExtractor:
         embed_url = url if "/e/" in url else f"https://{parsed.netloc}/e/{video_id}"
 
         try:
-            logger.info(f"ðŸš€ DoodStream: Trying cloudscraper extraction for {embed_url}")
+            logger.info(f"DoodStream: Trying cloudscraper extraction for {embed_url}")
 
             result = await self._do_extract_with_proxy(
                 embed_url,
@@ -306,7 +306,7 @@ class DoodStreamExtractor:
 
             raise ExtractorError("DoodStream: tokens not found after primary and auto-proxy attempts")
         except Exception as e:
-            logger.error(f"âŒ DoodStream: cloudscraper error: {e}")
+            logger.error(f"DoodStream: cloudscraper error: {e}")
             raise ExtractorError(f"DoodStream: cloudscraper extraction failed: {e}")
 
     def _finalize_extraction(self, base_stream: str, html: str, base_url: str, ua: str) -> dict:
@@ -321,7 +321,7 @@ class DoodStreamExtractor:
         rand_str = "".join(random.choice(string.ascii_letters + string.digits) for _ in range(10))
         final_url = f"{base_stream}{rand_str}?token={token}&expiry={expiry}"
 
-        logger.info(f"âœ… DoodStream successful sniffed extraction: {final_url[:60]}...")
+        logger.info(f"DoodStream successful sniffed extraction: {final_url[:60]}...")
         return {
             "destination_url": final_url,
             "request_headers": {"User-Agent": ua, "Referer": f"{base_url}/", "Accept": "*/*"},
