@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: realbestia1/easyproxy
+  IMAGE_NAME: qwertyuiop8899/easyproxy
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
