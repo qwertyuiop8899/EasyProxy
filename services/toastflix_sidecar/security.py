@@ -99,7 +99,7 @@ def request_token(request, body: dict | None = None) -> str:
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return (
-        request.query_params.get("t")
+        request.query.get("t")
         or request.headers.get("x-sidecar-token")
         or str((body or {}).get("token") or "")
     ).strip()
