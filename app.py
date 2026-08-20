@@ -30,10 +30,7 @@ def _read_file(path):
 # --- Logica di Avvio ---
 def create_app():
     """Crea e configura l'applicazione aiohttp."""
-    sidecar_cache_dir = os.environ.get(
-        "SIDECAR_CACHE_DIR",
-        os.path.join(RECORDINGS_DIR, "sidecar_data"),
-    )
+    sidecar_cache_dir = os.path.join(RECORDINGS_DIR, "sidecar_data")
     sidecar_manager = SidecarManager(cache_dir=sidecar_cache_dir)
     proxy = HLSProxy(sidecar_manager=sidecar_manager)
 
@@ -112,7 +109,7 @@ def create_app():
     # ✅ Health check endpoint
     app.router.add_get('/health', lambda r: web.json_response({"status": "ok", "version": APP_VERSION}))
 
-    # Toastflix FastAPI sidecar, kept private and exposed through this process.
+    # Toastflix aiohttp sidecar, kept private and exposed through this process.
     app.router.add_route('*', '/sidecar', proxy.handle_sidecar_request)
     app.router.add_route('*', '/sidecar/{tail:.*}', proxy.handle_sidecar_request)
 
