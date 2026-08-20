@@ -5,7 +5,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-import httpx
+import aiohttp
 
 
 class OffsetStore:
@@ -70,12 +70,17 @@ class OffsetStore:
                 central_payload = dict(payload)
                 if payload.get("vpsAccess"):
                     central_payload["access"] = payload["vpsAccess"]
-                async with httpx.AsyncClient(timeout=8) as client:
-                    response = await client.post(f"{api_url}/lookup", json=central_payload, headers=headers)
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("found") and data.get("offset") is not None:
-                        return data["offset"]
+                timeout = aiohttp.ClientTimeout(total=8)
+                async with aiohttp.ClientSession(timeout=timeout) as client:
+                    async with client.post(
+                        f"{api_url}/lookup",
+                        json=central_payload,
+                        headers=headers,
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json(content_type=None)
+                            if data.get("found") and data.get("offset") is not None:
+                                return data["offset"]
             except Exception:
                 pass
         return await asyncio.to_thread(self._local_get, payload["cache_key"])
@@ -108,11 +113,13 @@ class OffsetStore:
             central_payload = {**payload, "offset": result}
             if payload.get("vpsAccess"):
                 central_payload["access"] = payload["vpsAccess"]
-            async with httpx.AsyncClient(timeout=8) as client:
-                await client.post(
+            timeout = aiohttp.ClientTimeout(total=8)
+            async with aiohttp.ClientSession(timeout=timeout) as client:
+                async with client.post(
                     f"{api_url}/report",
                     json=central_payload,
                     headers=headers,
-                )
+                ):
+                    pass
         except Exception:
             pass
