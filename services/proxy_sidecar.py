@@ -1,4 +1,4 @@
-"""Reverse proxy for the embedded Toastflix FastAPI sidecar."""
+"""Reverse proxy for the embedded Toastflix aiohttp sidecar."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _HOP_BY_HOP_HEADERS = {
 
 
 class HLSProxySidecarMixin:
-    """Forward ``/sidecar`` requests to the private Uvicorn process."""
+    """Forward ``/sidecar`` requests to the private aiohttp process."""
 
     def _init_sidecar_proxy(self, manager: "SidecarManager") -> None:
         self.sidecar_manager = manager
@@ -91,7 +91,7 @@ class HLSProxySidecarMixin:
             request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip()
             or request.scheme
         )
-        # Uvicorn uses the actual Host header for request.base_url. Keep the
+        # The sidecar uses the actual Host header for its public base URL. Keep the
         # public host here, otherwise generated audio URLs expose 127.0.0.1
         # and the child's random internal port to Toastflix.
         headers["Host"] = forwarded_host
