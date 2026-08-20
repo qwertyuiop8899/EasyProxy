@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class SidecarManager:
-    """Start, health-check, and stop the FastAPI sidecar process.
+    """Start, health-check, and stop the embedded aiohttp sidecar process.
 
     The sidecar is deliberately bound to loopback.  EasyProxy is the only
     public entry point and forwards requests to the child process through the
@@ -29,40 +29,19 @@ class SidecarManager:
     ):
         project_dir = Path(__file__).resolve().parent.parent
         self.project_dir = project_dir
-        self.sidecar_module = "services.toastflix_sidecar.app:app"
+        self.sidecar_module = "services.toastflix_sidecar.app"
         self.cache_dir = Path(
-            cache_dir
-            or os.environ.get("SIDECAR_CACHE_DIR", project_dir / "recordings" / "sidecar_data")
+            cache_dir or project_dir / "recordings" / "sidecar_data"
         ).resolve()
 
-        self.host = os.environ.get("SIDECAR_HOST", "127.0.0.1").strip() or "127.0.0.1"
-        self.configured_port = self._parse_port(
-            os.environ.get("SIDECAR_INTERNAL_PORT")
-            or os.environ.get("SIDECAR_PORT")
-            or "0"
-        )
-        self.startup_timeout = max(
-            1.0, float(os.environ.get("SIDECAR_STARTUP_TIMEOUT", "20"))
-        )
-        self.forwarded_allow_ips = (
-            os.environ.get("SIDECAR_FORWARDED_ALLOW_IPS", "127.0.0.1").strip()
-            or "127.0.0.1"
-        )
+        self.host = "127.0.0.1"
+        self.configured_port = 0
+        self.startup_timeout = 20.0
 
         self.process: asyncio.subprocess.Process | None = None
         self.port: int | None = None
         self._log_task: asyncio.Task | None = None
         self._stopping = False
-
-    @staticmethod
-    def _parse_port(value: str) -> int:
-        try:
-            port = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid SIDECAR_INTERNAL_PORT/SIDECAR_PORT: {value!r}") from exc
-        if not 0 <= port <= 65535:
-            raise ValueError(f"Invalid sidecar port: {port}")
-        return port
 
     @property
     def running(self) -> bool:
@@ -94,20 +73,17 @@ class SidecarManager:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.port = self.configured_port or self._find_free_port()
         child_env = os.environ.copy()
-        child_env["SIDECAR_CACHE_DIR"] = str(self.cache_dir)
 
         command = [
             sys.executable,
             "-m",
-            "uvicorn",
             self.sidecar_module,
             "--host",
             self.host,
             "--port",
             str(self.port),
-            "--proxy-headers",
-            "--forwarded-allow-ips",
-            self.forwarded_allow_ips,
+            "--cache-dir",
+            str(self.cache_dir),
         ]
         logger.info(
             "Starting Toastflix sidecar on %s:%s (cache: %s)",
