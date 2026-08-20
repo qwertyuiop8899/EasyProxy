@@ -26,13 +26,10 @@ class SidecarManager:
     def __init__(
         self,
         cache_dir: str | os.PathLike[str] | None = None,
-        sidecar_dir: str | os.PathLike[str] | None = None,
     ):
         project_dir = Path(__file__).resolve().parent.parent
-        self.sidecar_dir = Path(
-            sidecar_dir
-            or os.environ.get("SIDECAR_DIR", project_dir / "toastflix-sidecar-main")
-        ).resolve()
+        self.project_dir = project_dir
+        self.sidecar_module = "services.toastflix_sidecar.app:app"
         self.cache_dir = Path(
             cache_dir
             or os.environ.get("SIDECAR_CACHE_DIR", project_dir / "recordings" / "sidecar_data")
@@ -90,8 +87,9 @@ class SidecarManager:
             return
         if self.process is not None:
             await self.stop()
-        if not self.sidecar_dir.is_dir() or not (self.sidecar_dir / "app.py").is_file():
-            raise FileNotFoundError(f"Toastflix sidecar directory not found: {self.sidecar_dir}")
+        sidecar_app = self.project_dir / "services" / "toastflix_sidecar" / "app.py"
+        if not sidecar_app.is_file():
+            raise FileNotFoundError(f"Embedded Toastflix sidecar not found: {sidecar_app}")
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.port = self.configured_port or self._find_free_port()
@@ -102,7 +100,7 @@ class SidecarManager:
             sys.executable,
             "-m",
             "uvicorn",
-            "app:app",
+            self.sidecar_module,
             "--host",
             self.host,
             "--port",
@@ -120,7 +118,7 @@ class SidecarManager:
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *command,
-                cwd=str(self.sidecar_dir),
+                cwd=str(self.project_dir),
                 env=child_env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
