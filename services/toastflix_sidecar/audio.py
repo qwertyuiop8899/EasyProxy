@@ -11,9 +11,8 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
 
-import httpx
-
 from .security import valid_public_url
+from .http_client import client_session
 
 
 class AudioStore:
@@ -155,15 +154,18 @@ class AudioStore:
     async def _download(self, url: str, headers: dict):
         if not valid_public_url(url):
             raise ValueError("audio URL is not public HTTPS")
-        kwargs = {"timeout": 30, "follow_redirects": True}
-        if self.proxy:
-            kwargs["proxy"] = self.proxy
-        async with httpx.AsyncClient(**kwargs) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            if len(response.content) > 20 * 1024 * 1024:
-                raise ValueError("audio segment too large")
-            return response.content
+        async with client_session(self.proxy, timeout=30) as (client, request_proxy):
+            async with client.get(
+                url,
+                headers=headers,
+                proxy=request_proxy,
+                allow_redirects=True,
+            ) as response:
+                response.raise_for_status()
+                content = await response.read()
+        if len(content) > 20 * 1024 * 1024:
+            raise ValueError("audio segment too large")
+        return content
 
     @staticmethod
     def _boxes(data: bytes, start=0, end=None):
