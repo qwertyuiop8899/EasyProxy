@@ -41,6 +41,7 @@ class SidecarManager:
         self.process: asyncio.subprocess.Process | None = None
         self.port: int | None = None
         self._log_task: asyncio.Task | None = None
+        self._child_output: list[str] = []
         self._stopping = False
 
     @property
@@ -72,6 +73,7 @@ class SidecarManager:
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.port = self.configured_port or self._find_free_port()
+        self._child_output.clear()
         child_env = os.environ.copy()
 
         command = [
@@ -149,7 +151,11 @@ class SidecarManager:
             while asyncio.get_running_loop().time() < deadline:
                 if self.process is None or self.process.returncode is not None:
                     code = None if self.process is None else self.process.returncode
-                    raise RuntimeError(f"Toastflix sidecar exited before readiness (code={code})")
+                    details = "\n".join(self._child_output[-20:])
+                    message = f"Toastflix sidecar exited before readiness (code={code})"
+                    if details:
+                        message += f"\nSidecar output:\n{details}"
+                    raise RuntimeError(message)
                 try:
                     async with session.get(health_url) as response:
                         if response.status == 200:
@@ -167,6 +173,9 @@ class SidecarManager:
             async for raw_line in process.stdout:
                 line = raw_line.decode(errors="replace").rstrip()
                 if line:
+                    self._child_output.append(line)
+                    if len(self._child_output) > 100:
+                        del self._child_output[:-100]
                     logger.info("[sidecar] %s", line)
         except asyncio.CancelledError:
             raise
