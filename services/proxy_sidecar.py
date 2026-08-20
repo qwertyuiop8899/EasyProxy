@@ -83,8 +83,20 @@ class HLSProxySidecarMixin:
         forwarded_for = ", ".join(item for item in (existing_forwarded_for, remote) if item)
         if forwarded_for:
             headers["X-Forwarded-For"] = forwarded_for
-        headers["X-Forwarded-Host"] = request.headers.get("X-Forwarded-Host") or request.host
-        headers["X-Forwarded-Proto"] = request.headers.get("X-Forwarded-Proto") or request.scheme
+        forwarded_host = (
+            request.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip()
+            or request.host
+        )
+        forwarded_proto = (
+            request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip()
+            or request.scheme
+        )
+        # Uvicorn uses the actual Host header for request.base_url. Keep the
+        # public host here, otherwise generated audio URLs expose 127.0.0.1
+        # and the child's random internal port to Toastflix.
+        headers["Host"] = forwarded_host
+        headers["X-Forwarded-Host"] = forwarded_host
+        headers["X-Forwarded-Proto"] = forwarded_proto
         headers["X-Forwarded-Prefix"] = external_prefix
 
         try:
