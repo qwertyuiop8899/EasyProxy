@@ -13,3 +13,6 @@ cloudscraper
 brotli
 psutil
 pywidevine
+fastapi
+uvicorn
+httpx[socks]
