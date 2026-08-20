@@ -9,11 +9,23 @@ from array import array
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-import httpx
+import aiohttp
 
 from .audio import AudioStore
+from .http_client import client_session
 from .offsets import OffsetStore
 from .security import resolves_publicly, valid_public_url
+
+
+class _MediaResponse:
+    def __init__(self, status_code: int, headers: dict, content: bytes):
+        self.status_code = status_code
+        self.headers = headers
+        self.content = content
+
+    @property
+    def text(self):
+        return self.content.decode("utf-8", errors="replace")
 
 
 class SyncEngine:
@@ -26,20 +38,27 @@ class SyncEngine:
     async def _get(self, url: str, headers: dict):
         if not valid_public_url(url) or not await resolves_publicly(url):
             raise ValueError("media URL is not public HTTPS")
-        kwargs = {"timeout": 30, "follow_redirects": False}
-        if self.proxy:
-            kwargs["proxy"] = self.proxy
         try:
-            async with httpx.AsyncClient(**kwargs) as client:
-                response = await client.get(url, headers=headers)
-        except httpx.HTTPError as exc:
+            async with client_session(self.proxy, timeout=30) as (client, request_proxy):
+                async with client.get(
+                    url,
+                    headers=headers,
+                    proxy=request_proxy,
+                    allow_redirects=False,
+                ) as response:
+                    status_code = response.status
+                    response_headers = dict(response.headers)
+                    content = await response.read()
+        except aiohttp.ClientError as exc:
             raise RuntimeError(f"media fetch failed: {exc}") from exc
+        response = _MediaResponse(status_code, response_headers, content)
         if response.status_code in (301, 302, 307, 308):
             location = response.headers.get("location", "")
             if not await resolves_publicly(urljoin(url, location)):
                 raise ValueError("media redirect is not public HTTPS")
             return await self._get(urljoin(url, location), headers)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            raise RuntimeError(f"media fetch failed: HTTP {response.status_code}")
         return response
 
     @staticmethod
