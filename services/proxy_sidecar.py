@@ -53,53 +53,63 @@ class HLSProxySidecarMixin:
         external_prefix: str,
     ) -> web.StreamResponse:
         manager = getattr(self, "sidecar_manager", None)
-        if manager is None or not manager.running:
+        if manager is None:
             return web.json_response(
                 {"detail": "Toastflix sidecar is not available"}, status=503
             )
 
-        path, _, raw_query = request.raw_path.partition("?")
-        if external_prefix and path == external_prefix:
-            sidecar_path = "/"
-        elif external_prefix and path.startswith(f"{external_prefix}/"):
-            sidecar_path = path[len(external_prefix):] or "/"
-        else:
-            # This branch is only a defensive fallback for direct unit calls.
-            sidecar_path = path or "/"
-            if external_prefix:
-                tail = request.match_info.get("tail", "")
-                sidecar_path = f"/{tail}" if tail else "/"
-                raw_query = request.query_string
-        target_url = manager.target_url(sidecar_path, raw_query)
-
-        headers = {
-            key: value
-            for key, value in request.headers.items()
-            if key.lower() not in _HOP_BY_HOP_HEADERS
-            and key.lower() not in {"host", "content-length"}
-        }
-        remote = request.remote or ""
-        existing_forwarded_for = request.headers.get("X-Forwarded-For", "").strip()
-        forwarded_for = ", ".join(item for item in (existing_forwarded_for, remote) if item)
-        if forwarded_for:
-            headers["X-Forwarded-For"] = forwarded_for
-        forwarded_host = (
-            request.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip()
-            or request.host
-        )
-        forwarded_proto = (
-            request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip()
-            or request.scheme
-        )
-        # The sidecar uses the actual Host header for its public base URL. Keep the
-        # public host here, otherwise generated audio URLs expose 127.0.0.1
-        # and the child's random internal port to Toastflix.
-        headers["Host"] = forwarded_host
-        headers["X-Forwarded-Host"] = forwarded_host
-        headers["X-Forwarded-Proto"] = forwarded_proto
-        headers["X-Forwarded-Prefix"] = external_prefix
+        request_started = False
+        try:
+            await manager.begin_request()
+            request_started = True
+        except Exception as exc:
+            return web.json_response(
+                {"detail": f"Toastflix sidecar is not available: {exc}"},
+                status=503,
+            )
 
         try:
+            path, _, raw_query = request.raw_path.partition("?")
+            if external_prefix and path == external_prefix:
+                sidecar_path = "/"
+            elif external_prefix and path.startswith(f"{external_prefix}/"):
+                sidecar_path = path[len(external_prefix):] or "/"
+            else:
+                # This branch is only a defensive fallback for direct unit calls.
+                sidecar_path = path or "/"
+                if external_prefix:
+                    tail = request.match_info.get("tail", "")
+                    sidecar_path = f"/{tail}" if tail else "/"
+                    raw_query = request.query_string
+            target_url = manager.target_url(sidecar_path, raw_query)
+
+            headers = {
+                key: value
+                for key, value in request.headers.items()
+                if key.lower() not in _HOP_BY_HOP_HEADERS
+                and key.lower() not in {"host", "content-length"}
+            }
+            remote = request.remote or ""
+            existing_forwarded_for = request.headers.get("X-Forwarded-For", "").strip()
+            forwarded_for = ", ".join(item for item in (existing_forwarded_for, remote) if item)
+            if forwarded_for:
+                headers["X-Forwarded-For"] = forwarded_for
+            forwarded_host = (
+                request.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip()
+                or request.host
+            )
+            forwarded_proto = (
+                request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip()
+                or request.scheme
+            )
+            # The sidecar uses the actual Host header for its public base URL. Keep the
+            # public host here, otherwise generated audio URLs expose 127.0.0.1
+            # and the child's random internal port to Toastflix.
+            headers["Host"] = forwarded_host
+            headers["X-Forwarded-Host"] = forwarded_host
+            headers["X-Forwarded-Proto"] = forwarded_proto
+            headers["X-Forwarded-Prefix"] = external_prefix
+
             body = await request.read()
             session = await self._get_sidecar_session()
             async with session.request(
@@ -124,6 +134,9 @@ class HLSProxySidecarMixin:
             return web.json_response(
                 {"detail": f"Toastflix sidecar request failed: {exc}"}, status=502
             )
+        finally:
+            if request_started:
+                await manager.end_request()
 
     async def handle_sidecar_request(self, request: web.Request) -> web.StreamResponse:
         """Handle the backwards-compatible ``/sidecar/*`` namespace."""
