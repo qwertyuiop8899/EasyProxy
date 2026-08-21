@@ -23,6 +23,8 @@ class SidecarManager:
     :class:`HLSProxySidecarMixin`.
     """
 
+    IDLE_TIMEOUT_SECONDS = 60 * 60
+
     def __init__(
         self,
         cache_dir: str | os.PathLike[str] | None = None,
@@ -42,7 +44,10 @@ class SidecarManager:
         self.port: int | None = None
         self._log_task: asyncio.Task | None = None
         self._child_output: list[str] = []
-        self._stopping = False
+        self._lifecycle_lock = asyncio.Lock()
+        self._idle_handle: asyncio.TimerHandle | None = None
+        self._last_activity: float | None = None
+        self._active_requests = 0
 
     @property
     def running(self) -> bool:
@@ -63,10 +68,30 @@ class SidecarManager:
 
     async def start(self) -> None:
         """Launch the sidecar and wait until its health endpoint responds."""
-        if self.running:
-            return
+        async with self._lifecycle_lock:
+            if self.running:
+                self._touch_unlocked()
+                return
+            await self._start_unlocked()
+
+    async def begin_request(self) -> None:
+        """Start the sidecar on demand and keep it alive for this request."""
+        async with self._lifecycle_lock:
+            if not self.running:
+                await self._start_unlocked()
+            self._active_requests += 1
+            self._touch_unlocked()
+
+    async def end_request(self) -> None:
+        """Release a request and restart the idle-shutdown countdown."""
+        async with self._lifecycle_lock:
+            self._active_requests = max(0, self._active_requests - 1)
+            if self.running:
+                self._touch_unlocked()
+
+    async def _start_unlocked(self) -> None:
         if self.process is not None:
-            await self.stop()
+            await self._stop_unlocked()
         sidecar_app = self.project_dir / "services" / "toastflix_sidecar" / "app.py"
         if not sidecar_app.is_file():
             raise FileNotFoundError(f"Embedded Toastflix sidecar not found: {sidecar_app}")
@@ -105,37 +130,77 @@ class SidecarManager:
             self._log_task = asyncio.create_task(self._read_output())
             await self._wait_until_ready()
         except Exception:
-            await self.stop()
+            await self._stop_unlocked()
             raise
 
         logger.info("Toastflix sidecar is ready at %s", self.base_url)
+        self._touch_unlocked()
 
     async def stop(self) -> None:
         """Stop the child process and its output reader without leaving orphans."""
-        if self._stopping:
-            return
-        self._stopping = True
-        try:
-            process = self.process
-            if process is not None and process.returncode is None:
-                logger.info("Stopping Toastflix sidecar (pid=%s)", process.pid)
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    logger.warning("Toastflix sidecar did not stop cleanly; killing it")
-                    process.kill()
-                    await process.wait()
+        async with self._lifecycle_lock:
+            await self._stop_unlocked()
 
-            if self._log_task is not None:
-                self._log_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._log_task
-        finally:
-            self._log_task = None
-            self.process = None
-            self.port = None
-            self._stopping = False
+    async def _stop_unlocked(self) -> None:
+        if self._idle_handle is not None:
+            self._idle_handle.cancel()
+            self._idle_handle = None
+
+        process = self.process
+        if process is not None and process.returncode is None:
+            logger.info("Stopping Toastflix sidecar (pid=%s)", process.pid)
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                logger.warning("Toastflix sidecar did not stop cleanly; killing it")
+                process.kill()
+                await process.wait()
+
+        if self._log_task is not None:
+            self._log_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._log_task
+
+        self._log_task = None
+        self.process = None
+        self.port = None
+        self._last_activity = None
+        self._active_requests = 0
+
+    def _touch_unlocked(self) -> None:
+        self._last_activity = asyncio.get_running_loop().time()
+        if self._idle_handle is not None:
+            self._idle_handle.cancel()
+        self._idle_handle = asyncio.get_running_loop().call_later(
+            self.IDLE_TIMEOUT_SECONDS,
+            self._idle_timeout_callback,
+        )
+
+    def _idle_timeout_callback(self) -> None:
+        self._idle_handle = None
+        asyncio.create_task(self._stop_if_idle())
+
+    async def _stop_if_idle(self) -> None:
+        async with self._lifecycle_lock:
+            if not self.running:
+                return
+            if self._active_requests:
+                self._touch_unlocked()
+                return
+            last_activity = self._last_activity or 0.0
+            idle_for = asyncio.get_running_loop().time() - last_activity
+            if idle_for < self.IDLE_TIMEOUT_SECONDS:
+                self._idle_handle = asyncio.get_running_loop().call_later(
+                    self.IDLE_TIMEOUT_SECONDS - idle_for,
+                    self._idle_timeout_callback,
+                )
+                return
+            logger.info(
+                "Stopping Toastflix sidecar after %.1f hours without requests",
+                self.IDLE_TIMEOUT_SECONDS / 3600,
+            )
+            await self._stop_unlocked()
 
     def _find_free_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
