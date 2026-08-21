@@ -95,9 +95,9 @@ def _audio_url(request: web.Request, hid: str, token: str, offset: float = 0.0, 
     return f"{_base_url(request)}/dual/aud/{hid}/audio.m3u8?{query}"
 
 
-def _audio_response(path: Path, media_type: str, cache_control: str = "no-cache") -> web.Response:
-    return web.FileResponse(
-        path,
+def _audio_response(data: bytes, media_type: str, cache_control: str = "no-store") -> web.Response:
+    return web.Response(
+        body=data,
         headers={
             "Content-Type": media_type,
             "Access-Control-Allow-Origin": "*",
@@ -205,8 +205,8 @@ async def audio_init(request: web.Request) -> web.Response:
         timeline = audio.timeline(metadata, offset_ms / 1000.0, rate_nano / 1_000_000_000)
         if not timeline:
             raise ValueError("empty audio timeline")
-        init_path, _ = await audio.fragment(hid, timeline[0]["idx"], offset_ms / 1000.0, rate_nano / 1_000_000_000)
-        return _audio_response(init_path, "video/mp4", "public, max-age=3600")
+        init_data, _ = await audio.fragment_bytes(hid, timeline[0]["idx"], offset_ms / 1000.0, rate_nano / 1_000_000_000)
+        return _audio_response(init_data, "video/mp4")
     except (ValueError, FileNotFoundError, RuntimeError) as exc:
         raise SidecarError(404, str(exc)) from exc
 
@@ -218,8 +218,8 @@ async def audio_segment(request: web.Request) -> web.Response:
     offset_ms = _query_int(request, "o", 0)
     rate_nano = _query_int(request, "r", 1_000_000_000)
     try:
-        _, fragment_path = await audio.fragment(hid, index, offset_ms / 1000.0, rate_nano / 1_000_000_000)
-        return _audio_response(fragment_path, "video/iso.segment", "public, max-age=3600")
+        _, fragment_data = await audio.fragment_bytes(hid, index, offset_ms / 1000.0, rate_nano / 1_000_000_000)
+        return _audio_response(fragment_data, "video/iso.segment")
     except (ValueError, FileNotFoundError, RuntimeError) as exc:
         raise SidecarError(404, str(exc)) from exc
 
