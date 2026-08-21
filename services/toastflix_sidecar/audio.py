@@ -2,34 +2,62 @@ import asyncio
 import base64
 import hashlib
 import json
-import os
 import re
-import shutil
 import struct
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 
 from .security import valid_public_url
 from .http_client import client_session
 
 
 class AudioStore:
-    def __init__(self, root: str, proxy: str = "", max_bytes: int = 10 * 1024**3):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+    """Hold audio metadata in memory and never persist audio fragments.
+
+    The sidecar is used as a personal service, so source audio and generated
+    fMP4 fragments are processed per request and removed with their temporary
+    working directory. Offset data remains persisted separately by OffsetStore.
+    """
+
+    TRACK_TTL_SECONDS = 21600
+    MAX_TRACKS = 128
+
+    def __init__(self, root: str, proxy: str = "", max_bytes: int | None = None):
         self.proxy = proxy.strip()
-        self.max_bytes = max_bytes
         self._locks: dict[str, asyncio.Lock] = {}
+        self._tracks: dict[str, dict] = {}
 
     def _lock(self, hid: str):
         return self._locks.setdefault(hid, asyncio.Lock())
 
-    def _dir(self, hid: str) -> Path:
+    def _track(self, hid: str) -> dict:
         if not re.fullmatch(r"[0-9a-f]{16}", hid):
             raise ValueError("invalid audio id")
-        return self.root / hid
+        track = self._tracks.get(hid)
+        if track is None:
+            raise FileNotFoundError("audio track not found")
+        track["last_used"] = time.monotonic()
+        return track
+
+    def _remember(self, hid: str, metadata: dict, key: bytes) -> None:
+        now = time.monotonic()
+        self._tracks[hid] = {
+            "metadata": metadata,
+            "key": key,
+            "last_used": now,
+        }
+        expired = [
+            key_id
+            for key_id, track in self._tracks.items()
+            if now - track["last_used"] > self.TRACK_TTL_SECONDS
+        ]
+        for key_id in expired:
+            self._tracks.pop(key_id, None)
+        while len(self._tracks) > self.MAX_TRACKS:
+            oldest = min(self._tracks, key=lambda key_id: self._tracks[key_id]["last_used"])
+            self._tracks.pop(oldest, None)
 
     @staticmethod
     def _parse_playlist(playlist: str, base_url: str = ""):
@@ -80,10 +108,7 @@ class AudioStore:
         }
         stable = [urlparse(url).path for url in segments[:3]]
         hid = hashlib.sha1(("|".join(stable) + str(len(segments)) + language).encode()).hexdigest()[:16]
-        directory = self._dir(hid)
         async with self._lock(hid):
-            directory.mkdir(parents=True, exist_ok=True)
-            (directory / "enc.key").write_bytes(key)
             starts, total = [], 0.0
             for duration in durations[:len(segments)]:
                 starts.append(total)
@@ -100,43 +125,19 @@ class AudioStore:
                     ("|".join(stable) + str(len(segments))).encode()
                 ).hexdigest()[:20],
             }
-            (directory / "meta.json").write_text(json.dumps(metadata), encoding="utf-8")
+            self._remember(hid, metadata, key)
         return hid
 
     def metadata(self, hid: str):
-        path = self._dir(hid) / "meta.json"
-        if not path.exists():
-            raise FileNotFoundError("audio track not found")
-        return json.loads(path.read_text(encoding="utf-8"))
+        return self._track(hid)["metadata"]
+
+    def key_bytes(self, hid: str) -> bytes:
+        return self._track(hid)["key"]
 
     def find_cached(self, media_key: str, language: str):
-        candidates = []
-        for directory in self.root.iterdir():
-            if not directory.is_dir() or not re.fullmatch(r"[0-9a-f]{16}", directory.name):
-                continue
-            try:
-                metadata = self.metadata(directory.name)
-                if (
-                    metadata.get("media_key") == media_key
-                    and metadata.get("language") in {language, "it" if language == "ita" else "en"}
-                    and self._cache_is_fresh(metadata)
-                ):
-                    candidates.append((directory.stat().st_mtime, directory.name))
-            except (OSError, ValueError, json.JSONDecodeError):
-                continue
-        return max(candidates)[1] if candidates else None
-
-    @staticmethod
-    def _cache_is_fresh(metadata: dict, safety_window: int = 60) -> bool:
-        """Do not reuse signed media URLs that are expired or nearly expired."""
-        expiries = []
-        for url in metadata.get("segs") or []:
-            query = parse_qs(urlparse(url).query)
-            value = (query.get("expires") or query.get("e") or [None])[0]
-            if not value or not str(value).isdigit():
-                return False
-            expiries.append(int(value))
-        return bool(expiries) and min(expiries) > time.time() + safety_window
+        # Persistent audio reuse is intentionally disabled. Toastflix will
+        # call /dual/aprep again and receive a fresh in-memory track.
+        return None
 
     @staticmethod
     def timeline(metadata: dict, offset: float = 0.0, rate: float = 1.0):
@@ -224,26 +225,18 @@ class AudioStore:
         else:
             struct.pack_into(">I", fragment, position + header + 4, value)
 
-    async def fragment(self, hid: str, index: int, offset: float, rate: float):
+    async def fragment_bytes(self, hid: str, index: int, offset: float, rate: float):
         metadata = self.metadata(hid)
         timeline = self.timeline(metadata, offset, rate)
         item = next((entry for entry in timeline if entry["idx"] == index), None)
         if not item:
             raise ValueError("audio segment outside timeline")
-        directory = self._dir(hid)
-        suffix = f"{int(round(offset * 1000)):+d}_r{int(round(rate * 1e9))}"
-        init_path = directory / f"init_{suffix}.mp4"
-        fragment_path = directory / f"s{index}_{suffix}.m4s"
-        if init_path.exists() and fragment_path.exists():
-            return init_path, fragment_path
         async with self._lock(hid):
-            if init_path.exists() and fragment_path.exists():
-                return init_path, fragment_path
-            work = Path(tempfile.mkdtemp(prefix=f"work-{index}-", dir=directory))
-            try:
+            with tempfile.TemporaryDirectory(prefix=f"sidecar-audio-{hid}-") as temp_dir:
+                work = Path(temp_dir)
                 source = await self._download(metadata["segs"][index], metadata.get("headers") or {})
                 (work / "src.ts").write_bytes(source)
-                (work / "enc.key").write_bytes((directory / "enc.key").read_bytes())
+                (work / "enc.key").write_bytes(self.key_bytes(hid))
                 iv = f",IV={metadata['iv']}" if metadata.get("iv") else ""
                 (work / "input.m3u8").write_text(
                     "#EXTM3U\n#EXT-X-VERSION:3\n"
@@ -260,19 +253,14 @@ class AudioStore:
                 made = work / "f0.m4s"
                 if process.returncode or not made.exists():
                     raise RuntimeError((error.decode(errors="replace") or "ffmpeg failed")[:300])
-                if not init_path.exists():
-                    shutil.copy2(work / "init.mp4", init_path)
+                init_data = (work / "init.mp4").read_bytes()
                 fragment = bytearray(made.read_bytes())
                 timescale = 48000
-                found = self._find_box(init_path.read_bytes(), [b"moov", b"trak", b"mdia", b"mdhd"])
+                found = self._find_box(init_data, [b"moov", b"trak", b"mdia", b"mdhd"])
                 if found:
-                    data = init_path.read_bytes()
                     position, _, header = found
-                    version = data[position + header]
+                    version = init_data[position + header]
                     offset_pos = position + header + (20 if version == 1 else 12)
-                    timescale = struct.unpack(">I", data[offset_pos:offset_pos + 4])[0] or 48000
+                    timescale = struct.unpack(">I", init_data[offset_pos:offset_pos + 4])[0] or 48000
                 self._patch_time(fragment, timescale, item["start"])
-                fragment_path.write_bytes(fragment)
-                return init_path, fragment_path
-            finally:
-                shutil.rmtree(work, ignore_errors=True)
+                return init_data, bytes(fragment)
