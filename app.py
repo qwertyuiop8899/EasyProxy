@@ -144,7 +144,8 @@ def create_app():
     app.on_cleanup.append(cleanup_handler)
     
     async def on_startup(app):
-        await sidecar_manager.start()
+        # The sidecar is started lazily by the first /sidecar request and is
+        # stopped after 1 hour without activity.
         asyncio.create_task(proxy.start_tasks())
         asyncio.create_task(recording_manager.cleanup_loop())
     app.on_startup.append(on_startup)
