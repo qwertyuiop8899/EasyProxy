@@ -293,7 +293,17 @@ def main() -> None:
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     args = parser.parse_args()
     _configure_cache(args.cache_dir)
-    web.run_app(app, host=args.host, port=args.port, access_log=None)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    )
+    logging.getLogger("aiohttp.access").setLevel(logging.INFO)
+    web.run_app(
+        app,
+        host=args.host,
+        port=args.port,
+        access_log=logging.getLogger("aiohttp.access"),
+    )
 
 
 if __name__ == "__main__":
