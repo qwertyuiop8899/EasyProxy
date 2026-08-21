@@ -184,7 +184,7 @@ class SyncEngine:
         lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD",
                  f"#EXT-X-TARGETDURATION:{int(max(metadata['durs'][item] for item in selected)) + 1}",
                  f'#EXT-X-KEY:METHOD=AES-128,URI="audio.key"{iv}']
-        (directory / "audio.key").write_bytes((self.audio._dir(hid) / "enc.key").read_bytes())
+        (directory / "audio.key").write_bytes(self.audio.key_bytes(hid))
         for number, item in enumerate(selected):
             name = f"audio-{number}.ts"
             await self._download(metadata["segs"][item], directory / name, metadata.get("headers") or {})
